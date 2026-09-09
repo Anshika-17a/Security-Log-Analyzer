@@ -1,13 +1,17 @@
 import pandas as pd
 import datetime
 from sqlalchemy.orm import Session
-from app.models.schema import Alert, Incident
+from app.models.schema import Alert, Incident, IncidentAction
 from app.correlation.scoring import calculate_score
 from app.remediation.recommendations import generate_recommendations
 
 def group_and_correlate(db: Session):
-    # Idempotency: clear existing incidents and remove assignment from alerts
+    # Idempotency: clear existing incidents and remove assignment from alerts.
+    # IncidentAction rows must go too - a bulk delete bypasses the ORM cascade
+    # (and SQLite does not enforce ON DELETE CASCADE unless PRAGMA foreign_keys
+    # is on), so without this every call appends a duplicate set of actions.
     db.query(Alert).update({Alert.incident_id: None})
+    db.query(IncidentAction).delete()
     db.query(Incident).delete()
     db.commit()
 
