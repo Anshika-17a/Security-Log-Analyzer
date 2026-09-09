@@ -1,5 +1,12 @@
 # Render Blueprint — https://render.com/docs/blueprint-spec
 # Deploy: Render Dashboard -> New -> Blueprint -> pick this repo.
+
+databases:
+  - name: security-log-analyzer-db
+    plan: free
+    databaseName: security_logs
+    user: security_logs
+
 services:
   - type: web
     name: security-log-analyzer
@@ -13,14 +20,19 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.13.4"
-      # Free tier has an ephemeral filesystem: the SQLite file is wiped on every
-      # redeploy/restart. Seeding on boot guarantees a populated demo dashboard.
+      # Managed Postgres. Render injects the connection string; app/models/db.py
+      # rewrites the postgres:// scheme to the psycopg v3 driver. Data now
+      # survives redeploys and cold starts, unlike the ephemeral SQLite file.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: security-log-analyzer-db
+          property: connectionString
+      # Populates the database on first boot so the dashboard is never empty.
+      # No-ops once logs exist, so it costs nothing on later restarts.
       - key: SEED_ON_START
         value: "true"
       - key: SEED_FILE
         value: "data/sample_logs.csv"
-      - key: DATABASE_URL
-        value: "sqlite:///./logs.db"
       # Optional: set in the Render dashboard (do NOT commit a real key)
       # - key: GEMINI_API_KEY
       #   sync: false

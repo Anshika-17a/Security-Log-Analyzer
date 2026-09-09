@@ -50,26 +50,70 @@ works unmodified on Railway, Fly.io and Cloud Run.
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `8000` | Injected by the host; uvicorn binds to it. |
-| `DATABASE_URL` | `sqlite:///./logs.db` | SQLAlchemy URL. Point at Postgres for durable storage. |
+| `DATABASE_URL` | `sqlite:///./logs.db` | SQLAlchemy URL. `postgres://` / `postgresql://` are rewritten to psycopg v3 automatically. See **Database**. |
 | `SEED_ON_START` | `false` | If true, populate an empty DB on boot (see below). |
 | `SEED_FILE` | `data/sample_logs.csv` | Which log file to seed from. |
 | `GEMINI_API_KEY` | *(unset)* | Enables the AI narrative endpoint. Set it in the Render dashboard — **never commit it**. |
 
 ---
 
+## Database
+
+The app talks to the database through SQLAlchemy, so the storage backend is
+purely a matter of `DATABASE_URL`. Two supported dialects:
+
+| Dialect | URL | When |
+|---|---|---|
+| **SQLite** (default) | `sqlite:///./logs.db` | Local dev. Zero setup, but the file is ephemeral on hosted free tiers. |
+| **Postgres** | `postgresql://user:pass@host:5432/dbname` | Anything deployed. Data survives redeploys, cold starts and restarts. |
+
+`app/models/db.py` rewrites `postgres://` and `postgresql://` to the psycopg v3
+driver automatically, so you can paste a provider's connection string verbatim —
+Render, Heroku and Railway all hand out the legacy `postgres://` scheme that
+SQLAlchemy 2 rejects on its own.
+
+**Using Render's blueprint,** nothing needs doing: [`render.yaml`](render.yaml)
+provisions a Postgres instance and injects `DATABASE_URL` into the web service.
+
+**Using any other provider** (Neon, Supabase, Railway, a local server), set
+`DATABASE_URL` and everything else is unchanged:
+
+```bash
+export DATABASE_URL="postgresql://user:pass@host:5432/security_logs"
+uvicorn app.main:app --reload
+```
+
+Tables are created automatically on startup by `init_db()`. Switching backends
+starts from an empty database — there is no migration path between the two, so
+re-upload your logs (or let `SEED_ON_START` do it).
+
+> **Render free Postgres expires.** The free instance is deleted after its trial
+> window, taking your data with it. Fine for a hackathon. For anything longer
+> use Neon or Supabase (free tiers that do not expire), or Render's paid plan.
+
+MySQL is *not* supported as-is: the `EntityBaseline` upsert uses
+`ON CONFLICT DO UPDATE` (SQLite/Postgres syntax, MySQL needs
+`ON DUPLICATE KEY UPDATE`), and the `String` columns have no length, which MySQL
+requires. `app/detection/baseline.py` raises a clear error rather than emitting
+broken SQL.
+
+---
+
 ## Seeding (why the deployed dashboard isn't empty)
 
-Free tiers use an **ephemeral filesystem**: the SQLite file is destroyed on
-every redeploy and every cold start. Without seeding, judges opening the URL
-would see an empty dashboard.
+On SQLite, free tiers use an **ephemeral filesystem**: the file is destroyed on
+every redeploy and cold start, so judges opening the URL would see an empty
+dashboard. On Postgres the data persists and seeding only matters for the very
+first boot.
 
 With `SEED_ON_START=true`, startup ingests `SEED_FILE`, runs the rule engine,
 the ML detector and the correlator — producing **500 logs → 119 alerts →
 101 incidents** before the first request is served. It is a no-op if the
 database already has logs, so restarts never double-count.
 
-For durable storage instead, attach a Render Disk mounted at `/data` and set
-`DATABASE_URL=sqlite:////data/logs.db`, or provision Postgres.
+To keep SQLite but make it durable, attach a Render Disk mounted at `/data` and
+set `DATABASE_URL=sqlite:////data/logs.db`. Postgres (above) is the better
+default and is what the blueprint provisions.
 
 ---
 

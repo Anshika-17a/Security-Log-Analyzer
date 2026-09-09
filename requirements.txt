@@ -22,6 +22,11 @@ reportlab==5.0.1
 # app/reporting/narrative.py). Source-only package, no wheel.
 drain3==0.9.11
 
+# Postgres driver. Only needed when DATABASE_URL points at Postgres; the app
+# falls back to SQLite (stdlib) when it does not. psycopg v3 - app/models/db.py
+# rewrites postgres:// and postgresql:// URLs to postgresql+psycopg://.
+psycopg[binary]==3.3.5
+
 # Test/demo helpers
 requests==2.34.2
 pytest==9.0.2

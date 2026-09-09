@@ -2,8 +2,27 @@ import pandas as pd
 import numpy as np
 import json
 import datetime
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from app.models.schema import EntityBaseline
+
+
+def _upsert(db, table, values):
+    """Build an INSERT ... ON CONFLICT DO UPDATE for the session's dialect.
+
+    SQLite and Postgres both support the construct with the same API, but it
+    lives in the dialect package, so the right one has to be chosen at runtime
+    rather than imported once.
+    """
+    dialect = db.get_bind().dialect.name
+    if dialect == 'postgresql':
+        return pg_insert(table).values(values)
+    if dialect == 'sqlite':
+        return sqlite_insert(table).values(values)
+    raise RuntimeError(
+        f"Unsupported database dialect '{dialect}'. "
+        "Baseline upserts need SQLite or Postgres."
+    )
 
 def _compute_for_group(group_df):
     if group_df.empty:
@@ -73,7 +92,7 @@ def compute_baselines(db, df):
         })
         
     if mappings:
-        stmt = sqlite_insert(EntityBaseline).values(mappings)
+        stmt = _upsert(db, EntityBaseline, mappings)
         stmt = stmt.on_conflict_do_update(
             index_elements=['entity_id'],
             set_={
