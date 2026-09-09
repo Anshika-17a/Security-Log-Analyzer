@@ -1,0 +1,26 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Deploy: Render Dashboard -> New -> Blueprint -> pick this repo.
+services:
+  - type: web
+    name: security-log-analyzer
+    runtime: python
+    plan: free
+    region: singapore          # closest to India; change if judging elsewhere
+    branch: main
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.4"
+      # Free tier has an ephemeral filesystem: the SQLite file is wiped on every
+      # redeploy/restart. Seeding on boot guarantees a populated demo dashboard.
+      - key: SEED_ON_START
+        value: "true"
+      - key: SEED_FILE
+        value: "data/sample_logs.csv"
+      - key: DATABASE_URL
+        value: "sqlite:///./logs.db"
+      # Optional: set in the Render dashboard (do NOT commit a real key)
+      # - key: GEMINI_API_KEY
+      #   sync: false

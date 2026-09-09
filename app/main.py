@@ -25,9 +25,52 @@ from app.reporting.report_generator import generate_incident_report_md, generate
 from app.reporting.narrative import cluster_logs, generate_llm_narrative
 
 
+SEED_FILE = os.environ.get("SEED_FILE", "data/sample_logs.csv")
+
+
+def _seed_demo_data():
+    """Populate an empty database with the bundled sample logs and run the
+    full detection + correlation pipeline.
+
+    Hosted free tiers use an ephemeral filesystem, so the SQLite file is wiped
+    on every redeploy/restart. Without this the deployed dashboard would come
+    up empty. No-ops if logs already exist or the seed file is missing.
+    """
+    from app.models.db import SessionLocal
+
+    if not os.path.exists(SEED_FILE):
+        print(f"[seed] skipped: {SEED_FILE} not found")
+        return
+
+    db = SessionLocal()
+    try:
+        if db.query(Log).count() > 0:
+            print("[seed] skipped: database already has logs")
+            return
+
+        print(f"[seed] ingesting {SEED_FILE} ...")
+        with open(SEED_FILE, "rb") as fh:
+            result = parse_and_ingest_csv(fh, db, filename=os.path.basename(SEED_FILE))
+        if result.get("status") == "error":
+            print(f"[seed] ingest failed: {result.get('message')}")
+            return
+
+        alerts = _generate_alerts(db)
+        incidents = group_and_correlate(db)
+        print(f"[seed] done: {result.get('rows_inserted', 0)} logs, "
+              f"{len(alerts)} alerts, {len(incidents)} incidents")
+    except Exception as exc:  # never let seeding block startup
+        db.rollback()
+        print(f"[seed] error: {type(exc).__name__}: {exc}")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    if os.environ.get("SEED_ON_START", "false").lower() in ("1", "true", "yes"):
+        _seed_demo_data()
     yield
 
 app = FastAPI(
@@ -70,8 +113,7 @@ def get_dashboard(request: Request, db: Session = Depends(get_db)):
         "low": low
     }
     
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "dashboard.html", {
         "counts": counts,
         "top_incidents": top_incidents,
         "last_refreshed": pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -102,34 +144,43 @@ def upload_logs(file: UploadFile = File(...), db: Session = Depends(get_db)):
     return {"status": "success", "processed": processed, "skipped": skipped}
 
 
-@app.get("/api/alerts", response_model=AlertsResponse, summary="Generate Alerts", description="Runs the rule engine and ML baseline anomaly detection to generate alerts from the ingested logs.")
-def get_alerts(db: Session = Depends(get_db)):
+def _generate_alerts(db: Session) -> list:
+    """Run baselines + rule engine + ML detector over all ingested logs.
+
+    Shared by the /api/alerts endpoint and the startup demo seeder.
+    """
     logs = db.query(Log).all()
     if not logs:
-        return {"status": "success", "alerts_generated": 0, "alerts": []}
-        
+        return []
+
     df = pd.DataFrame([l.__dict__ for l in logs])
     if '_sa_instance_state' in df.columns:
         df = df.drop(columns=['_sa_instance_state'])
     df['ts'] = pd.to_datetime(df['ts'], errors='coerce')
     df = df.dropna(subset=['ts']).copy()
-    
+
     compute_baselines(db, df)
     raw_alerts = run_all_rules(df)
-    
+
     alert_mappings = []
     for alert_dict, evidence in raw_alerts:
         ad = alert_dict.copy()
         ad['evidence'] = evidence
         alert_mappings.append(ad)
-        
+
     ml_alerts = detect_anomalies(db, df, alert_mappings)
     all_alerts = alert_mappings + ml_alerts
-        
+
     if all_alerts:
         db.bulk_insert_mappings(Alert, all_alerts)
         db.commit()
-        
+
+    return all_alerts
+
+
+@app.get("/api/alerts", response_model=AlertsResponse, summary="Generate Alerts", description="Runs the rule engine and ML baseline anomaly detection to generate alerts from the ingested logs.")
+def get_alerts(db: Session = Depends(get_db)):
+    all_alerts = _generate_alerts(db)
     return {"status": "success", "alerts_generated": len(all_alerts), "alerts": all_alerts}
 
 @app.get("/api/incidents", response_model=IncidentListResponse, summary="Correlate Incidents", description="Groups unassigned alerts into candidate incidents, calculates dynamic risk scores, and generates remediation recommendations.")
