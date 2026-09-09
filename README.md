@@ -237,8 +237,14 @@ tests/demo_script.sh          End-to-end pipeline demo
 
 See **[DEPLOY.md](DEPLOY.md)** for step-by-step instructions. Short version:
 push to GitHub, then *Render → New → Blueprint → select this repo*.
-[`render.yaml`](render.yaml) provisions Postgres, wires `DATABASE_URL`, and
-seeds the database on first boot.
+[`render.yaml`](render.yaml) configures the web service and seeds the database
+on first boot.
+
+The blueprint does not provision Postgres — Render allows only one free database
+per account, and declaring a second fails the whole sync. Attach one by setting
+`DATABASE_URL` in the Render dashboard (Neon and Supabase have free tiers that
+don't count against that limit); without it the app runs on SQLite, which resets
+on redeploys.
 
 ---
 

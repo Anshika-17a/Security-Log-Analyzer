@@ -72,11 +72,51 @@ driver automatically, so you can paste a provider's connection string verbatim �
 Render, Heroku and Railway all hand out the legacy `postgres://` scheme that
 SQLAlchemy 2 rejects on its own.
 
-**Using Render's blueprint,** nothing needs doing: [`render.yaml`](render.yaml)
-provisions a Postgres instance and injects `DATABASE_URL` into the web service.
+### Render only allows one free database per account
 
-**Using any other provider** (Neon, Supabase, Railway, a local server), set
-`DATABASE_URL` and everything else is unchanged:
+[`render.yaml`](render.yaml) deliberately does **not** declare a database. Render
+permits exactly one free-tier Postgres per account, so if the account already has
+one, declaring another fails the entire blueprint sync:
+
+```
+Create database security-log-analyzer-db  x cannot have more than one active free tier database
+Create web service security-log-analyzer  x canceled: another action failed
+```
+
+The web service is cancelled only because the database step failed first; nothing
+is created, so there is nothing to clean up. Pick one of the options below and
+re-sync.
+
+### Option 1 — external free Postgres (recommended)
+
+Neon and Supabase both give you a free Postgres that does **not** count against
+Render's limit and does **not** expire.
+
+1. Create a project at [neon.tech](https://neon.tech) (or
+   [supabase.com](https://supabase.com)) and copy the connection string.
+2. In Render: *Service -> Environment -> Add Environment Variable*
+   - key `DATABASE_URL`
+   - value the connection string, pasted as-is
+3. Save. Render redeploys and `init_db()` creates the tables on boot.
+
+The `postgres://` scheme these providers hand out is rewritten to psycopg v3
+automatically, so no editing is needed.
+
+### Option 2 — reuse the existing Render Postgres
+
+Open the existing database in the Render dashboard, copy its **Internal Database
+URL**, and set it as `DATABASE_URL` exactly as above. Check what that database
+belongs to first — if a teammate's project is using it, prefer Option 1 rather
+than sharing an instance.
+
+### Option 3 — no database (default)
+
+Change nothing. The app falls back to SQLite and `SEED_ON_START` keeps the
+dashboard populated. Data resets on every redeploy and cold start, which is
+fine for a demo but means analyst status changes do not survive a restart.
+
+**Running locally against Postgres**, set `DATABASE_URL` and nothing else
+changes:
 
 ```bash
 export DATABASE_URL="postgresql://user:pass@host:5432/security_logs"
@@ -87,9 +127,9 @@ Tables are created automatically on startup by `init_db()`. Switching backends
 starts from an empty database — there is no migration path between the two, so
 re-upload your logs (or let `SEED_ON_START` do it).
 
-> **Render free Postgres expires.** The free instance is deleted after its trial
-> window, taking your data with it. Fine for a hackathon. For anything longer
-> use Neon or Supabase (free tiers that do not expire), or Render's paid plan.
+> **Render's free Postgres expires** and is deleted with your data when its trial
+> window ends. This is the other reason to prefer Neon or Supabase, whose free
+> tiers do not expire.
 
 MySQL is *not* supported as-is: the `EntityBaseline` upsert uses
 `ON CONFLICT DO UPDATE` (SQLite/Postgres syntax, MySQL needs
