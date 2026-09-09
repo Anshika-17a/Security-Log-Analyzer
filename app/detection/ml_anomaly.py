@@ -67,6 +67,60 @@ def _extract_features(group: pd.DataFrame) -> dict:
     }
 
 
+def _build_window_features(df_work: pd.DataFrame) -> pd.DataFrame:
+    """Compute the 9 features for every (user, hour-window) in one pass.
+
+    The per-group helper above is the readable reference implementation, but
+    calling it once per group means ~10 pandas operations on a handful of rows
+    each. At 10k logs that is ~7,700 groups and pandas' per-call overhead
+    dominates: it accounted for 19 of 27 seconds in a profile. Aggregating the
+    whole frame at once pushes the same work into vectorised C.
+    """
+    status = df_work["status"].fillna("").str.lower()
+    event = df_work["event"].fillna("").str.lower()
+    hours = df_work["ts"].dt.hour
+
+    d = df_work.assign(
+        _failed_login=((status == "failed") & event.str.contains("login", na=False)),
+        _off_hours=((hours >= 22) | (hours < 6)),
+        _blocked=(status == "blocked"),
+        _privesc=event.isin(["privilege_escalation", "role_elevation"]),
+        _export=(event == "export"),
+    )
+    if "id" not in d.columns:
+        d = d.assign(id=0)
+
+    g = d.groupby(["user", "ts_window"], sort=False)
+    out = g.agg(
+        event_count=("ts", "size"),
+        failed_login_count=("_failed_login", "sum"),
+        distinct_ips_used=("ip", "nunique"),
+        distinct_resources_touched=("resource", "nunique"),
+        off_hours_event_ratio=("_off_hours", "mean"),
+        blocked_event_ratio=("_blocked", "mean"),
+        privilege_change_count=("_privesc", "sum"),
+        export_volume=("_export", "sum"),
+        _ts_min=("ts", "min"),
+        last_ts=("ts", "max"),
+        last_ip=("ip", "last"),
+        log_id=("id", "last"),
+    ).reset_index()
+
+    # Mean gap between events; a single-event window has no gap.
+    span = (out["last_ts"] - out["_ts_min"]).dt.total_seconds()
+    n = out["event_count"]
+    out["avg_time_between_events"] = np.where(n > 1, span / (n - 1).where(n > 1, 1), 0.0).astype(float)
+    out = out.drop(columns=["_ts_min"])
+
+    for c in ("failed_login_count", "distinct_ips_used", "distinct_resources_touched",
+              "privilege_change_count", "export_volume", "event_count", "log_id"):
+        out[c] = out[c].astype(int)
+    for c in ("off_hours_event_ratio", "blocked_event_ratio"):
+        out[c] = out[c].astype(float)
+    out["last_ip"] = out["last_ip"].astype(str)
+    return out
+
+
 def _score_user_windows(user_windows: pd.DataFrame) -> pd.Series:
     """
     Fit an IsolationForest on all of a user's windows and return per-window
@@ -134,22 +188,13 @@ def detect_anomalies(db, df: pd.DataFrame, rule_alerts: list) -> list:
     df_work = df_work.dropna(subset=["ts"])
     df_work["ts_window"] = df_work["ts"].dt.floor("1h")
 
-    feature_rows = []
-    for (user, tw), group in df_work.groupby(["user", "ts_window"]):
-        if not user:
-            continue
-        feats = _extract_features(group)
-        feats["user"]       = user
-        feats["ts_window"]  = tw
-        feats["last_ts"]    = group["ts"].max()
-        feats["last_ip"]    = group["ip"].iloc[-1]
-        feats["log_id"]     = int(group["id"].iloc[-1]) if "id" in group.columns else 0
-        feature_rows.append(feats)
-
-    if not feature_rows:
+    df_work = df_work[df_work["user"].astype(bool)]
+    if df_work.empty:
         return []
 
-    all_windows = pd.DataFrame(feature_rows)
+    all_windows = _build_window_features(df_work)
+    if all_windows.empty:
+        return []
 
     # ── 2. Score each user's windows against THEIR OWN history ──────────────
     score_parts = []
@@ -162,6 +207,10 @@ def detect_anomalies(db, df: pd.DataFrame, rule_alerts: list) -> list:
     scored = pd.concat(score_parts, ignore_index=True)
 
     # ── 3. Emit ML alert for every window above the threshold ────────────────
+    # Counting a user's windows by filtering the frame inside the loop was a
+    # full scan per emitted alert; count once up front instead.
+    windows_per_user = scored["user"].value_counts().to_dict()
+
     ml_alerts = []
     for _, row in scored[scored["anomaly_score"] >= ANOMALY_THRESHOLD].iterrows():
         score  = float(row["anomaly_score"])
@@ -187,7 +236,7 @@ def detect_anomalies(db, df: pd.DataFrame, rule_alerts: list) -> list:
 
         evidence = (
             f"User {user} has ML Anomaly Score {score:.2f} "
-            f"(relative to their own {len(scored[scored['user']==user])} historical hour-windows). "
+            f"(relative to their own {windows_per_user.get(user, 0)} historical hour-windows). "
             f"Key signals: {why}."
         )
 
