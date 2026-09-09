@@ -31,5 +31,7 @@ psycopg[binary]==3.3.5
 requests==2.34.2
 pytest==9.0.2
 
-# Optional: local/hosted LLM narrative. Uncomment if using the AI narrative.
-# google-genai
+# Google Gemini SDK, used by the /api/incidents/{id}/narrative endpoint.
+# The endpoint degrades gracefully when GEMINI_API_KEY is unset, so this is
+# safe to install even if you never configure a key.
+google-genai==2.22.0
