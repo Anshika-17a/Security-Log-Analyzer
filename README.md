@@ -198,10 +198,15 @@ the rest of the app is unaffected.
 | `GET` | `/api/incidents/{id}/narrative` | Drain3 clustering + Gemini summary |
 | `GET` | `/api/reports/{id}?format=md\|pdf` | Per-incident report |
 | `GET` | `/api/reports/summary?format=md\|pdf` | Org-wide report across open incidents |
+| `POST` | `/api/data/reset` | Delete all logs, alerts, incidents and history |
 
-`/api/alerts` **appends** on every call, while `/api/incidents` rebuilds
-incidents from scratch each time. Delete `logs.db` (or truncate the tables) to
-reset.
+Detection and correlation are both **idempotent** — `/api/alerts` and
+`/api/incidents` rebuild from scratch, so pressing Run repeatedly never
+duplicates alerts or inflates scores.
+
+Uploads **append**, which is correct for a log feed but means re-uploading the
+same file ingests it twice. Use the dashboard's **Reset** button (or
+`POST /api/data/reset`) to start a clean analysis.
 
 ---
 

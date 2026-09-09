@@ -10,7 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 import pandas as pd
 
 from app.models.db import init_db, get_db
-from app.models.schema import Log, Alert, Incident, IncidentAction, AuditLog
+from app.models.schema import Log, Alert, Incident, IncidentAction, AuditLog, EntityBaseline
 from app.models.api import (
     UploadResponse, HealthResponse, AlertsResponse, 
     IncidentListResponse, IncidentDetailResponse, 
@@ -149,6 +149,17 @@ def _generate_alerts(db: Session) -> list:
 
     Shared by the /api/alerts endpoint and the startup demo seeder.
     """
+    # Detection is a pure function of the log table, so regenerate from
+    # scratch. Appending would add a full duplicate set on every call, which
+    # compounds: each run re-scans a larger alert table, inflates correlation
+    # frequency bonuses, and skews every incident score.
+    #
+    # This must happen BEFORE the logs are loaded: commit() expires every
+    # object in the session, so logs read earlier would come back detached and
+    # their columns would be missing from the DataFrame.
+    db.query(Alert).delete()
+    db.commit()
+
     logs = db.query(Log).all()
     if not logs:
         return []
@@ -176,6 +187,26 @@ def _generate_alerts(db: Session) -> list:
         db.commit()
 
     return all_alerts
+
+
+@app.post("/api/data/reset", summary="Clear All Data", description="Deletes all logs, alerts, incidents, actions, baselines and audit history. Used to start a fresh analysis.")
+def reset_data(db: Session = Depends(get_db)):
+    """Wipe every derived and ingested row.
+
+    Uploads append, which is correct for a log feed but means re-uploading the
+    same file duplicates it. This gives the UI an explicit way to start clean.
+    Deletion order respects the foreign keys.
+    """
+    try:
+        deleted = {}
+        for model in (AuditLog, IncidentAction, Alert, Incident, EntityBaseline, Log):
+            deleted[model.__tablename__] = db.query(model).delete()
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to reset data")
+
+    return {"status": "success", "deleted": deleted}
 
 
 @app.get("/api/alerts", response_model=AlertsResponse, summary="Generate Alerts", description="Runs the rule engine and ML baseline anomaly detection to generate alerts from the ingested logs.")

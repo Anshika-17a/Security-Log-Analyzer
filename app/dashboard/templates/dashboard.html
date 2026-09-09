@@ -179,12 +179,16 @@ h1.title{font-size:52px;font-weight:300;letter-spacing:-.035em;line-height:1.02}
 .runbtn:hover:not(:disabled){transform:scale(1.06);box-shadow:0 6px 20px rgba(243,212,94,.62)}
 .runbtn:disabled{opacity:.45;cursor:not-allowed}
 .runbtn svg{width:17px;height:17px;fill:var(--ink)}
+.runlbl{flex:1;font-size:13.5px;font-weight:400;color:var(--ink);letter-spacing:-.01em}
 .stepbtn{
   border:0;border-radius:999px;background:rgba(255,255,255,.72);cursor:pointer;
   font-family:inherit;font-size:11.5px;font-weight:400;color:var(--ink-2);padding:9px 13px;
-  transition:background .18s;
+  transition:background .18s,color .18s;
 }
 .stepbtn:hover{background:#fff}
+.stepbtn.danger{color:var(--danger)}
+.stepbtn.danger:hover{background:var(--danger);color:#fff}
+.stepbtn:disabled{opacity:.45;cursor:not-allowed}
 .pipe-status{
   font-size:11.5px;color:var(--muted);font-weight:300;line-height:1.55;
   background:rgba(255,255,255,.5);border-radius:13px;padding:10px 13px;
@@ -597,12 +601,12 @@ td .rl{font-size:11.5px;color:var(--muted);display:block;max-width:290px;
       <input type="file" id="logFileInput" class="filepick"
              accept=".csv,.json,.jsonl,.log,.syslog,.txt,.ndjson">
       <div class="runrow">
-        <button class="runbtn" id="btnUpload" onclick="runPipeline()" title="Run full analysis">
+        <button class="runbtn" id="btnUpload" onclick="runPipeline()" title="Run the full analysis">
           <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
         </button>
-        <button class="stepbtn" onclick="doUpload()">Upload</button>
-        <button class="stepbtn" onclick="doDetect()">Detect</button>
-        <button class="stepbtn" onclick="doCorrelate()">Correlate</button>
+        <div class="runlbl">Run analysis</div>
+        <button class="stepbtn danger" id="btnReset" onclick="resetData()"
+                title="Delete all logs, alerts and incidents">Reset</button>
       </div>
       <div class="pipe-status" id="pipeStatus">Select a log file, then press play to run the full analysis.</div>
     </div>
@@ -742,7 +746,6 @@ async function doUpload(){
       return null;
     }
   } catch(e){ setStatus('Network error during upload.','err'); return null; }
-  finally { document.getElementById('btnUpload').disabled = false; }
 }
 
 async function doDetect(){
@@ -771,11 +774,39 @@ async function doCorrelate(){
 }
 
 async function runPipeline(){
-  const uploaded = await doUpload();
-  if (!uploaded) return;
-  const detected = await doDetect();
-  if (!detected) return;
-  await doCorrelate();
+  const run = document.getElementById('btnUpload');
+  const rst = document.getElementById('btnReset');
+  run.disabled = true; rst.disabled = true;
+  try {
+    const uploaded = await doUpload();
+    if (!uploaded) return;
+    const detected = await doDetect();
+    if (!detected) return;
+    await doCorrelate();          // reloads the page on success
+  } finally {
+    run.disabled = false; rst.disabled = false;
+  }
+}
+
+async function resetData(){
+  if (!confirm('Delete all logs, alerts and incidents?\n\nThis cannot be undone.')) return;
+  const run = document.getElementById('btnUpload');
+  const rst = document.getElementById('btnReset');
+  run.disabled = true; rst.disabled = true;
+  setStatus('Clearing all data...','busy');
+  try{
+    const res = await fetch('/api/data/reset', { method:'POST' });
+    if (res.ok){
+      setStatus('All data cleared - reloading...','ok');
+      setTimeout(()=>window.location.reload(), 700);
+    } else {
+      setStatus('Reset failed.','err');
+      run.disabled = false; rst.disabled = false;
+    }
+  } catch(e){
+    setStatus('Network error during reset.','err');
+    run.disabled = false; rst.disabled = false;
+  }
 }
 
 // ── CHART ─────────────────────────────────────────────────

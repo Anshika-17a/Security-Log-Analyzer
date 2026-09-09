@@ -25,18 +25,24 @@ def group_and_correlate(db: Session):
     df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed', errors='coerce')
     df = df.dropna(subset=['timestamp'])
     
-    incidents = []
-    
+    # id -> Alert, so building each group is O(size of group) rather than a
+    # full scan of every alert per group (which was O(alerts x groups)).
+    alerts_by_id = {a.id: a for a in all_alerts}
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    pending = []
+
     for (user, time_window), group in df.groupby(['user', pd.Grouper(key='timestamp', freq='30min')]):
-        alert_ids = group['id'].tolist()
-        group_alerts = [a for a in all_alerts if a.id in alert_ids]
-        
+        group_alerts = [alerts_by_id[i] for i in group['id'].tolist() if i in alerts_by_id]
+        if not group_alerts:
+            continue
+
         score, risk_level = calculate_score(group_alerts)
         rule_names = list(set([a.rule_name for a in group_alerts]))
-        
+
         ip_list = group['ip'].dropna().unique().tolist()
         ip_str = ip_list[0] if ip_list else ""
-        
+
         incident = Incident(
             user=user,
             ip=ip_str,
@@ -47,19 +53,31 @@ def group_and_correlate(db: Session):
             first_event_time=group['timestamp'].min().isoformat(),
             last_event_time=group['timestamp'].max().isoformat(),
             status="open",
-            updated_at=datetime.datetime.now(datetime.timezone.utc).isoformat()
+            updated_at=now
         )
         db.add(incident)
-        db.flush()
-        
+        pending.append((incident, group_alerts))
+
+    if not pending:
+        db.commit()
+        return []
+
+    # One flush populates every incident's primary key. Flushing inside the
+    # loop cost a network round trip per incident, which dominates runtime on
+    # a hosted database even though it is nearly free on local SQLite.
+    db.flush()
+
+    alert_updates = []
+    for incident, group_alerts in pending:
         for a in group_alerts:
-            a.incident_id = incident.id
-            
-        actions = generate_recommendations(incident.id, group_alerts)
-        for action in actions:
+            alert_updates.append({"id": a.id, "incident_id": incident.id})
+        for action in generate_recommendations(incident.id, group_alerts):
             db.add(action)
-            
-        incidents.append(incident)
-        
+
+    # Send the alert->incident links as a single batched statement instead of
+    # one UPDATE per alert.
+    if alert_updates:
+        db.bulk_update_mappings(Alert, alert_updates)
+
     db.commit()
-    return incidents
+    return [inc for inc, _ in pending]
